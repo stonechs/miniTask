@@ -140,9 +140,15 @@ static HICON make_icon(unsigned level)
 
     for (unsigned y = 0; y < ICON_SIZE; ++y) {
         for (unsigned x = 0; x < ICON_SIZE; ++x) {
-            DWORD fill = 0xff20262bu;
-            if (x >= 4 && x < 12 && y >= 3 && y < 13)
-                fill = (y >= 13 - level) ? 0xff65df87u : 0xff48535bu;
+            DWORD fill = 0xff101010u;
+            if (x >= 1 && x < 15 && y >= 1 && y < 15) {
+                if (x >= 2 && x < 14 && y >= 2 && y < 14) {
+                    unsigned height = (level * 12 + 9) / 10;
+                    fill = y >= 14 - height ? 0xff00f060u : 0xff65717au;
+                } else {
+                    fill = 0xff65717au;
+                }
+            }
             pixels[y * ICON_SIZE + x] = fill;
         }
     }
