@@ -15,6 +15,7 @@ enum {
     STARTUP_COMMAND,
     RANK_COMMAND,
     LOG_COMMAND,
+    LOG_FOLDER_COMMAND,
     HISTORY_TIMER = 2,
     ICON_SIZE = 16
 };
@@ -335,7 +336,7 @@ static void append_log(unsigned percent)
             log_buffer[log_length + i] = encoded[i];
         log_length += bytes;
     }
-    if (GetTickCount64() - last_log_flush >= 30000)
+    if (GetTickCount64() - last_log_flush >= 2000)
         flush_log();
 }
 
@@ -533,6 +534,8 @@ static void show_menu(HWND window, POINT position)
                 RANK_COMMAND, L"\x8bb0\x5f55\x6700\x9ad8\x8d1f\x8377\x8fdb\x7a0b");
     AppendMenuW(menu, MF_STRING | (log_enabled ? MF_CHECKED : 0),
                 LOG_COMMAND, L"\x8bb0\x5f55\x65e5\x5fd7");
+    AppendMenuW(menu, MF_STRING, LOG_FOLDER_COMMAND,
+                L"\x6253\x5f00\x65e5\x5fd7\x76ee\x5f55");
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
     if (!AppendMenuW(menu, MF_STRING, EXIT_COMMAND, L"\x9000\x51fa")) {
         DestroyMenu(menu);
@@ -540,7 +543,8 @@ static void show_menu(HWND window, POINT position)
     }
 
     SetForegroundWindow(window);
-    UINT command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON,
+    UINT command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY |
+                                  TPM_RIGHTBUTTON | TPM_RIGHTALIGN | TPM_BOTTOMALIGN,
                                   position.x, position.y, 0, window, NULL);
     DestroyMenu(menu);
     PostMessageW(window, WM_NULL, 0, 0);
@@ -570,6 +574,14 @@ static void execute_command(HWND window, UINT command)
             log_enabled = TRUE;
             write_setting(L"Log", 1);
         }
+    } else if (command == LOG_FOLDER_COMMAND) {
+        WCHAR folder[MAX_PATH];
+        DWORD length = GetEnvironmentVariableW(L"LOCALAPPDATA", folder, MAX_PATH);
+        if (length && length < MAX_PATH && length + 10 < MAX_PATH) {
+            lstrcatW(folder, L"\\miniTask");
+            CreateDirectoryW(folder, NULL);
+            ShellExecuteW(window, L"open", folder, NULL, NULL, SW_SHOWNORMAL);
+        }
     }
 }
 
@@ -598,10 +610,9 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LP
         return TRUE;
     case TRAY_EVENT:
         if (LOWORD(lparam) == WM_CONTEXTMENU) {
-            POINT position = { (SHORT)LOWORD(wparam), (SHORT)HIWORD(wparam) };
-            if (position.x == -1 && position.y == -1 && !GetCursorPos(&position))
-                return 0;
-            show_menu(window, position);
+            POINT position;
+            if (GetCursorPos(&position))
+                show_menu(window, position);
         } else if (LOWORD(lparam) == WM_RBUTTONUP && HIWORD(lparam) == 0) {
             /* Legacy shell callback when NIM_SETVERSION is unavailable. */
             POINT position;
@@ -667,6 +678,10 @@ static DWORD run(void)
     load_startup();
     DWORD setting;
     set_rank(read_setting(L"Rank", &setting) && setting != 0);
+    if (!read_setting(L"LogDefaultV03", &setting)) {
+        write_setting(L"Log", 1);
+        write_setting(L"LogDefaultV03", 1);
+    }
     log_enabled = read_setting(L"Log", &setting) && setting != 0 && open_log();
     HWND window = CreateWindowExW(WS_EX_TOOLWINDOW, class_name, L"miniTask",
                                   WS_POPUP, 0, 0, 0, 0, NULL, NULL, instance, NULL);
