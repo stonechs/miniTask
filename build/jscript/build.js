@@ -19,7 +19,7 @@ var flags = "-m64 -std=c11 -Os -g -Wall -Wextra -ffunction-sections -fdata-secti
     " -fno-stack-protector -nostdlib -mwindows -Wl,--gc-sections,-e,miniTaskStart" +
     " -DMINITASK_DIAGNOSTICS";
 var command = quote(gcc) + " " + flags + " -o " + quote(output) +
-    " src\\minitask.c -lkernel32 -luser32 -lshell32 -lgdi32";
+    " src\\minitask.c -lkernel32 -luser32 -lshell32 -lgdi32 -ladvapi32";
 WScript.Echo(command);
 var compiler = shell.Exec(command);
 var errors = compiler.StdErr.ReadAll();

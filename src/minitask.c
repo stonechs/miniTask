@@ -10,8 +10,19 @@ enum {
     SAMPLE_MS = 500,
     TRAY_EVENT = WM_APP + 1,
     EXIT_COMMAND = 1,
+    HISTORY_COMMAND,
+    STARTUP_COMMAND,
+    HISTORY_TIMER = 2,
     ICON_SIZE = 16
 };
+
+enum { HISTORY_CAPACITY = 128, HISTORY_SECONDS = 60 };
+
+typedef struct {
+    ULONGLONG tick;
+    unsigned value;
+    BOOL valid;
+} Sample;
 
 static const WCHAR class_name[] = L"miniTask.Tray";
 static NOTIFYICONDATAW tray;
@@ -21,6 +32,40 @@ static UINT taskbar_created;
 static unsigned shown_level = 11;
 static ULONGLONG previous_total, previous_idle;
 static BOOL has_baseline;
+static HWND history_window;
+static Sample history[HISTORY_CAPACITY];
+static unsigned history_head, history_count;
+static unsigned low_load_count;
+static DWORD sample_period = SAMPLE_MS;
+static BOOL startup_enabled = TRUE;
+static const WCHAR history_class[] = L"miniTask.History";
+static const WCHAR startup_key[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+static const WCHAR startup_value[] = L"miniTask";
+static const WCHAR settings_key[] = L"Software\\miniTask";
+
+static BOOL read_setting(const WCHAR *name, DWORD *value)
+{
+    HKEY key;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, settings_key, 0, KEY_QUERY_VALUE,
+                      &key) != ERROR_SUCCESS)
+        return FALSE;
+    DWORD type, size = sizeof(*value);
+    LONG result = RegQueryValueExW(key, name, NULL, &type, (BYTE *)value, &size);
+    RegCloseKey(key);
+    return result == ERROR_SUCCESS && type == REG_DWORD && size == sizeof(*value);
+}
+
+static BOOL write_setting(const WCHAR *name, DWORD value)
+{
+    HKEY key;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, settings_key, 0, NULL, 0,
+                        KEY_SET_VALUE, NULL, &key, NULL) != ERROR_SUCCESS)
+        return FALSE;
+    LONG result = RegSetValueExW(key, name, 0, REG_DWORD,
+                                 (const BYTE *)&value, sizeof(value));
+    RegCloseKey(key);
+    return result == ERROR_SUCCESS;
+}
 
 #ifdef MINITASK_DIAGNOSTICS
 /* Read-only messages used by the external measurement script. */
@@ -105,6 +150,123 @@ static void update_tray(unsigned level)
     shown_level = level;
 }
 
+static void add_history(unsigned percent, BOOL valid)
+{
+    Sample *sample = &history[history_head];
+    sample->tick = GetTickCount64();
+    sample->value = percent;
+    sample->valid = valid;
+    history_head = (history_head + 1) % HISTORY_CAPACITY;
+    if (history_count < HISTORY_CAPACITY)
+        ++history_count;
+    if (history_window)
+        InvalidateRect(history_window, NULL, FALSE);
+}
+
+static BOOL set_startup(BOOL enabled)
+{
+    HKEY key;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, startup_key, 0, NULL, 0,
+                        KEY_SET_VALUE, NULL, &key, NULL) != ERROR_SUCCESS)
+        return FALSE;
+    BOOL success;
+    if (enabled) {
+        WCHAR path[MAX_PATH], command[MAX_PATH + 3];
+        DWORD length = GetModuleFileNameW(NULL, path, MAX_PATH);
+        if (!length || length >= MAX_PATH) {
+            RegCloseKey(key);
+            return FALSE;
+        }
+        wsprintfW(command, L"\"%s\"", path);
+        success = RegSetValueExW(key, startup_value, 0, REG_SZ,
+                                 (const BYTE *)command,
+                                 (lstrlenW(command) + 1) * sizeof(WCHAR)) == ERROR_SUCCESS;
+    } else {
+        LONG result = RegDeleteValueW(key, startup_value);
+        success = result == ERROR_SUCCESS || result == ERROR_FILE_NOT_FOUND;
+    }
+    RegCloseKey(key);
+    return success;
+}
+
+static void load_startup(void)
+{
+    DWORD value;
+    startup_enabled = !read_setting(L"Startup", &value) || value != 0;
+    set_startup(startup_enabled);
+}
+
+static LRESULT CALLBACK history_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
+{
+    if (message == WM_PAINT) {
+        PAINTSTRUCT paint;
+        HDC dc = BeginPaint(window, &paint);
+        RECT client;
+        GetClientRect(window, &client);
+        FillRect(dc, &client, (HBRUSH)(COLOR_WINDOW + 1));
+        const int left = 38, top = 12, right = 12, bottom = 26;
+        int width = client.right - left - right;
+        int height = client.bottom - top - bottom;
+        HPEN grid = CreatePen(PS_SOLID, 1, RGB(220, 224, 228));
+        HGDIOBJ old_pen = SelectObject(dc, grid);
+        for (int line = 0; line <= 4; ++line) {
+            int y = top + height * line / 4;
+            MoveToEx(dc, left, y, NULL);
+            LineTo(dc, client.right - right, y);
+            WCHAR label[8];
+            wsprintfW(label, L"%d%%", 100 - line * 25);
+            TextOutW(dc, 2, y - 7, label, lstrlenW(label));
+        }
+        DeleteObject(SelectObject(dc, old_pen));
+        HPEN trace = CreatePen(PS_SOLID, 2, RGB(32, 135, 76));
+        old_pen = SelectObject(dc, trace);
+        POINT points[HISTORY_CAPACITY];
+        int count = 0;
+        ULONGLONG now = GetTickCount64();
+        unsigned first = (history_head + HISTORY_CAPACITY - history_count) % HISTORY_CAPACITY;
+        for (unsigned i = 0; i < history_count; ++i) {
+            Sample *sample = &history[(first + i) % HISTORY_CAPACITY];
+            if (!sample->valid || now - sample->tick > HISTORY_SECONDS * 1000ULL) {
+                if (count > 1)
+                    Polyline(dc, points, count);
+                count = 0;
+                continue;
+            }
+            points[count].x = client.right - right -
+                (int)((now - sample->tick) * (ULONGLONG)width /
+                      (HISTORY_SECONDS * 1000ULL));
+            points[count].y = top + height - (int)(sample->value * (ULONGLONG)height / 100);
+            ++count;
+        }
+        if (count > 1)
+            Polyline(dc, points, count);
+        DeleteObject(SelectObject(dc, old_pen));
+        EndPaint(window, &paint);
+        return 0;
+    }
+    if (message == WM_CLOSE) {
+        ShowWindow(window, SW_HIDE);
+        return 0;
+    }
+    return DefWindowProcW(window, message, wparam, lparam);
+}
+
+static void toggle_history(void)
+{
+    if (history_window) {
+        ShowWindow(history_window, IsWindowVisible(history_window) ? SW_HIDE : SW_SHOW);
+        if (IsWindowVisible(history_window))
+            SetForegroundWindow(history_window);
+        return;
+    }
+    history_window = CreateWindowExW(WS_EX_TOOLWINDOW, history_class,
+        L"miniTask - 最近 60 秒 CPU", WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX,
+        CW_USEDEFAULT, CW_USEDEFAULT, 380, 190, NULL, NULL,
+        GetModuleHandleW(NULL), NULL);
+    if (history_window)
+        ShowWindow(history_window, SW_SHOW);
+}
+
 static void sample_cpu(void)
 {
     FILETIME idle_time, kernel_time, user_time;
@@ -122,8 +284,10 @@ static void sample_cpu(void)
     has_baseline = TRUE;
     previous_total = total;
     previous_idle = idle;
-    if (!valid)
+    if (!valid) {
+        add_history(0, FALSE);
         return;
+    }
 
     ULONGLONG busy = elapsed - idle_elapsed;
     unsigned percent = (unsigned)((100 * busy + elapsed / 2) / elapsed);
@@ -134,7 +298,23 @@ static void sample_cpu(void)
     cpu_percent = percent;
     ++sample_count;
 #endif
+    add_history(percent, TRUE);
     update_tray((percent + 9) / 10);
+
+    if (percent < 3) {
+        if (low_load_count < 20)
+            ++low_load_count;
+        if (sample_period == SAMPLE_MS && low_load_count >= 20) {
+            sample_period = 2000;
+            SetCoalescableTimer(tray.hWnd, SAMPLE_TIMER, sample_period, NULL, 100);
+        }
+    } else {
+        low_load_count = 0;
+        if (sample_period != SAMPLE_MS && percent >= 8) {
+            sample_period = SAMPLE_MS;
+            SetCoalescableTimer(tray.hWnd, SAMPLE_TIMER, sample_period, NULL, 20);
+        }
+    }
 }
 
 static void show_menu(HWND window, POINT position)
@@ -142,6 +322,11 @@ static void show_menu(HWND window, POINT position)
     HMENU menu = CreatePopupMenu();
     if (!menu)
         return;
+    AppendMenuW(menu, MF_STRING | (history_window && IsWindowVisible(history_window)
+                                   ? MF_CHECKED : 0), HISTORY_COMMAND, L"\x5386\x53f2\x6ce2\x5f62");
+    AppendMenuW(menu, MF_STRING | (startup_enabled ? MF_CHECKED : 0),
+                STARTUP_COMMAND, L"\x767b\x5f55\x65f6\x542f\x52a8");
+    AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
     if (!AppendMenuW(menu, MF_STRING, EXIT_COMMAND, L"\x9000\x51fa")) {
         DestroyMenu(menu);
         return;
@@ -154,6 +339,13 @@ static void show_menu(HWND window, POINT position)
     PostMessageW(window, WM_NULL, 0, 0);
     if (command == EXIT_COMMAND)
         DestroyWindow(window);
+    else if (command == HISTORY_COMMAND)
+        toggle_history();
+    else if (command == STARTUP_COMMAND) {
+        BOOL next = !startup_enabled;
+        if (set_startup(next) && write_setting(L"Startup", next))
+            startup_enabled = next;
+    }
 }
 
 static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
@@ -203,6 +395,8 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LP
             Shell_NotifyIconW(NIM_DELETE, &tray);
         if (icon)
             DestroyIcon(icon);
+        if (history_window)
+            DestroyWindow(history_window);
         PostQuitMessage(0);
         return 0;
     }
@@ -223,6 +417,8 @@ static DWORD run(void)
     const WCHAR *error = L"Cannot initialize the tray window.";
     HINSTANCE instance = GetModuleHandleW(NULL);
     WNDCLASSW cls = { 0, window_proc, 0, 0, instance, NULL, NULL, NULL, NULL, class_name };
+    WNDCLASSW history_cls = { 0, history_proc, 0, 0, instance, NULL, NULL,
+                              (HBRUSH)(COLOR_WINDOW + 1), NULL, history_class };
 
     if (!SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS)) {
         error = L"Cannot set high process priority.";
@@ -236,6 +432,9 @@ static DWORD run(void)
     taskbar_created = RegisterWindowMessageW(L"TaskbarCreated");
     if (!RegisterClassW(&cls))
         goto done;
+    if (!RegisterClassW(&history_cls))
+        goto done;
+    load_startup();
     HWND window = CreateWindowExW(WS_EX_TOOLWINDOW, class_name, L"miniTask",
                                   WS_POPUP, 0, 0, 0, 0, NULL, NULL, instance, NULL);
     if (!window)
