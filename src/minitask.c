@@ -13,7 +13,6 @@ enum {
     EXIT_COMMAND = 1,
     HISTORY_COMMAND,
     STARTUP_COMMAND,
-    RANK_COMMAND,
     LOG_COMMAND,
     LOG_FOLDER_COMMAND,
     HISTORY_TIMER = 2,
@@ -112,8 +111,8 @@ static BOOL write_setting(const WCHAR *name, DWORD value)
 /* Read-only messages used by the external measurement script. */
 static ULONGLONG last_tick, sample_count;
 static DWORD interval_ms;
-static unsigned cpu_percent;
 #endif
+static unsigned cpu_percent;
 
 static ULONGLONG file_time(FILETIME value)
 {
@@ -161,8 +160,13 @@ static HICON make_icon(unsigned level)
 
 static void update_tray(unsigned level)
 {
-    if (tray_added && level == shown_level)
-        return;
+    WCHAR tip[128];
+    if (top_name[0])
+        wsprintfW(tip, L"CPU %u%% | %s %u%%", cpu_percent, top_name, top_percent);
+    else
+        wsprintfW(tip, L"CPU %u%% | 进程数据暂不可用", cpu_percent);
+    lstrcpynW(tray.szTip, tip, sizeof(tray.szTip) / sizeof(tray.szTip[0]));
+    tray.uFlags |= NIF_TIP;
 
     HICON next = icon;
     if (!icon || level != shown_level) {
@@ -530,8 +534,6 @@ static void show_menu(HWND window, POINT position)
                                    ? MF_CHECKED : 0), HISTORY_COMMAND, L"\x5386\x53f2\x6ce2\x5f62");
     AppendMenuW(menu, MF_STRING | (startup_enabled ? MF_CHECKED : 0),
                 STARTUP_COMMAND, L"\x767b\x5f55\x65f6\x542f\x52a8");
-    AppendMenuW(menu, MF_STRING | (rank_enabled ? MF_CHECKED : 0),
-                RANK_COMMAND, L"\x8bb0\x5f55\x6700\x9ad8\x8d1f\x8377\x8fdb\x7a0b");
     AppendMenuW(menu, MF_STRING | (log_enabled ? MF_CHECKED : 0),
                 LOG_COMMAND, L"\x8bb0\x5f55\x65e5\x5fd7");
     AppendMenuW(menu, MF_STRING, LOG_FOLDER_COMMAND,
@@ -562,9 +564,6 @@ static void execute_command(HWND window, UINT command)
         BOOL next = !startup_enabled;
         if (set_startup(next) && write_setting(L"Startup", next))
             startup_enabled = next;
-    } else if (command == RANK_COMMAND) {
-        if (set_rank(!rank_enabled))
-            write_setting(L"Rank", rank_enabled);
     } else if (command == LOG_COMMAND) {
         if (log_enabled) {
             log_enabled = FALSE;
@@ -677,7 +676,7 @@ static DWORD run(void)
         goto done;
     load_startup();
     DWORD setting;
-    set_rank(read_setting(L"Rank", &setting) && setting != 0);
+    set_rank(TRUE);
     if (!read_setting(L"LogDefaultV03", &setting)) {
         write_setting(L"Log", 1);
         write_setting(L"LogDefaultV03", 1);
