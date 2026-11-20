@@ -4,6 +4,7 @@
 #define _WIN32_WINNT 0x0602
 #include <windows.h>
 #include <shellapi.h>
+#include <tlhelp32.h>
 
 enum {
     SAMPLE_TIMER = 1,
@@ -12,6 +13,8 @@ enum {
     EXIT_COMMAND = 1,
     HISTORY_COMMAND,
     STARTUP_COMMAND,
+    RANK_COMMAND,
+    LOG_COMMAND,
     HISTORY_TIMER = 2,
     ICON_SIZE = 16
 };
@@ -42,6 +45,43 @@ static const WCHAR history_class[] = L"miniTask.History";
 static const WCHAR startup_key[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 static const WCHAR startup_value[] = L"miniTask";
 static const WCHAR settings_key[] = L"Software\\miniTask";
+static BOOL rank_enabled, log_enabled;
+static HANDLE log_file = INVALID_HANDLE_VALUE;
+static char *log_buffer;
+static DWORD log_length;
+static ULONGLONG last_log_flush;
+static WCHAR log_path[MAX_PATH];
+static unsigned peak_percent;
+static SYSTEMTIME peak_time;
+static WCHAR peak_name[64];
+static WCHAR top_name[64];
+static unsigned top_percent;
+
+typedef struct {
+    DWORD pid;
+    ULONGLONG created, cpu;
+} ProcessTime;
+static ProcessTime *process_times[2];
+static unsigned process_counts[2], process_slot;
+
+static BOOL set_rank(BOOL enabled)
+{
+    if (enabled && !process_times[0]) {
+        void *memory = VirtualAlloc(NULL, 2 * 512 * sizeof(ProcessTime),
+                                    MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        if (!memory)
+            return FALSE;
+        process_times[0] = memory;
+        process_times[1] = process_times[0] + 512;
+    }
+    if (!enabled && process_times[0]) {
+        VirtualFree(process_times[0], 0, MEM_RELEASE);
+        process_times[0] = process_times[1] = NULL;
+    }
+    process_counts[0] = process_counts[1] = 0;
+    rank_enabled = enabled;
+    return TRUE;
+}
 
 static BOOL read_setting(const WCHAR *name, DWORD *value)
 {
@@ -196,6 +236,162 @@ static void load_startup(void)
     set_startup(startup_enabled);
 }
 
+static void flush_log(void)
+{
+    if (log_file == INVALID_HANDLE_VALUE || !log_buffer || !log_length)
+        return;
+    DWORD written;
+    if (WriteFile(log_file, log_buffer, log_length, &written, NULL) &&
+        written == log_length) {
+        log_length = 0;
+        last_log_flush = GetTickCount64();
+        LARGE_INTEGER size;
+        if (GetFileSizeEx(log_file, &size) && size.QuadPart >= 2 * 1024 * 1024) {
+            CloseHandle(log_file);
+            log_file = INVALID_HANDLE_VALUE;
+            WCHAR old_path[MAX_PATH];
+            lstrcpyW(old_path, log_path);
+            lstrcatW(old_path, L".old");
+            BOOL moved = MoveFileExW(log_path, old_path, MOVEFILE_REPLACE_EXISTING);
+            log_file = CreateFileW(log_path, FILE_APPEND_DATA, FILE_SHARE_READ,
+                                   NULL, moved ? CREATE_ALWAYS : OPEN_ALWAYS,
+                                   FILE_ATTRIBUTE_NORMAL, NULL);
+            if (moved && log_file != INVALID_HANDLE_VALUE) {
+                static const char header[] =
+                    "time,cpu_percent,top_process,top_percent,peak_percent,peak_time,peak_process\r\n";
+                WriteFile(log_file, header, sizeof(header) - 1, &written, NULL);
+            }
+        }
+    }
+}
+
+static void close_log(void)
+{
+    flush_log();
+    if (log_file != INVALID_HANDLE_VALUE)
+        CloseHandle(log_file);
+    log_file = INVALID_HANDLE_VALUE;
+    if (log_buffer) {
+        VirtualFree(log_buffer, 0, MEM_RELEASE);
+        log_buffer = NULL;
+    }
+}
+
+static BOOL open_log(void)
+{
+    if (log_file != INVALID_HANDLE_VALUE)
+        return TRUE;
+    if (!log_buffer)
+        log_buffer = VirtualAlloc(NULL, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!log_buffer)
+        return FALSE;
+    WCHAR folder[MAX_PATH];
+    DWORD length = GetEnvironmentVariableW(L"LOCALAPPDATA", folder, MAX_PATH);
+    if (!length || length >= MAX_PATH || length + 22 >= MAX_PATH) {
+        close_log();
+        return FALSE;
+    }
+    lstrcatW(folder, L"\\miniTask");
+    CreateDirectoryW(folder, NULL);
+    lstrcpyW(log_path, folder);
+    lstrcatW(log_path, L"\\cpu-v2.csv");
+    log_file = CreateFileW(log_path, FILE_APPEND_DATA, FILE_SHARE_READ, NULL,
+                           OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (log_file == INVALID_HANDLE_VALUE) {
+        close_log();
+        return FALSE;
+    }
+    LARGE_INTEGER size;
+    if (GetFileSizeEx(log_file, &size) && size.QuadPart == 0) {
+        static const char header[] =
+            "time,cpu_percent,top_process,top_percent,peak_percent,peak_time,peak_process\r\n";
+        DWORD written;
+        WriteFile(log_file, header, sizeof(header) - 1, &written, NULL);
+    }
+    return TRUE;
+}
+
+static void append_log(unsigned percent)
+{
+    if (!log_enabled || !open_log())
+        return;
+    SYSTEMTIME time;
+    GetLocalTime(&time);
+    WCHAR line[320];
+    int chars = wsprintfW(line, L"%04u-%02u-%02u %02u:%02u:%02u.%03u,%u,%s,%u,%u,%04u-%02u-%02u %02u:%02u:%02u,%s\r\n",
+        time.wYear, time.wMonth, time.wDay, time.wHour, time.wMinute,
+        time.wSecond, time.wMilliseconds, percent, top_name, top_percent,
+        peak_percent, peak_time.wYear, peak_time.wMonth, peak_time.wDay,
+        peak_time.wHour, peak_time.wMinute, peak_time.wSecond, peak_name);
+    char encoded[640];
+    int bytes = WideCharToMultiByte(CP_UTF8, 0, line, chars, encoded,
+                                    sizeof(encoded), NULL, NULL);
+    if (bytes <= 0 || bytes > 4096)
+        return;
+    if (log_length + bytes > 4096)
+        flush_log();
+    if (log_length + bytes <= 4096) {
+        for (int i = 0; i < bytes; ++i)
+            log_buffer[log_length + i] = encoded[i];
+        log_length += bytes;
+    }
+    if (GetTickCount64() - last_log_flush >= 30000)
+        flush_log();
+}
+
+static void sample_processes(ULONGLONG system_elapsed)
+{
+    top_name[0] = 0;
+    top_percent = 0;
+    if (!rank_enabled || !process_times[0])
+        return;
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE)
+        return;
+    unsigned next = process_slot ^ 1;
+    process_counts[next] = 0;
+    ULONGLONG highest = 0;
+    PROCESSENTRY32W entry;
+    entry.dwSize = sizeof(entry);
+    if (Process32FirstW(snapshot, &entry)) {
+        do {
+            if (!entry.th32ProcessID || process_counts[next] >= 512)
+                continue;
+            HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,
+                                         FALSE, entry.th32ProcessID);
+            if (!process)
+                continue;
+            FILETIME created, exited, kernel, user;
+            BOOL read = GetProcessTimes(process, &created, &exited, &kernel, &user);
+            CloseHandle(process);
+            if (!read)
+                continue;
+            ProcessTime *current = &process_times[next][process_counts[next]++];
+            current->pid = entry.th32ProcessID;
+            current->created = file_time(created);
+            current->cpu = file_time(kernel) + file_time(user);
+            for (unsigned i = 0; i < process_counts[process_slot]; ++i) {
+                ProcessTime *previous = &process_times[process_slot][i];
+                if (previous->pid == current->pid &&
+                    previous->created == current->created &&
+                    current->cpu >= previous->cpu) {
+                    ULONGLONG delta = current->cpu - previous->cpu;
+                    if (delta > highest) {
+                        highest = delta;
+                        lstrcpynW(top_name, entry.szExeFile, 64);
+                    }
+                    break;
+                }
+            }
+        } while (Process32NextW(snapshot, &entry));
+    }
+    CloseHandle(snapshot);
+    process_slot = next;
+    if (system_elapsed && highest)
+        top_percent = (unsigned)((highest * 100 + system_elapsed / 2) /
+                                 system_elapsed);
+}
+
 static LRESULT CALLBACK history_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
 {
     if (message == WM_PAINT) {
@@ -291,6 +487,13 @@ static void sample_cpu(void)
 
     ULONGLONG busy = elapsed - idle_elapsed;
     unsigned percent = (unsigned)((100 * busy + elapsed / 2) / elapsed);
+    sample_processes(elapsed);
+    if (percent > peak_percent) {
+        peak_percent = percent;
+        GetLocalTime(&peak_time);
+        lstrcpynW(peak_name, top_name, 64);
+    }
+    append_log(percent);
 #ifdef MINITASK_DIAGNOSTICS
     ULONGLONG now = GetTickCount64();
     interval_ms = last_tick ? (DWORD)(now - last_tick) : 0;
@@ -326,6 +529,10 @@ static void show_menu(HWND window, POINT position)
                                    ? MF_CHECKED : 0), HISTORY_COMMAND, L"\x5386\x53f2\x6ce2\x5f62");
     AppendMenuW(menu, MF_STRING | (startup_enabled ? MF_CHECKED : 0),
                 STARTUP_COMMAND, L"\x767b\x5f55\x65f6\x542f\x52a8");
+    AppendMenuW(menu, MF_STRING | (rank_enabled ? MF_CHECKED : 0),
+                RANK_COMMAND, L"\x8bb0\x5f55\x6700\x9ad8\x8d1f\x8377\x8fdb\x7a0b");
+    AppendMenuW(menu, MF_STRING | (log_enabled ? MF_CHECKED : 0),
+                LOG_COMMAND, L"\x8bb0\x5f55\x65e5\x5fd7");
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
     if (!AppendMenuW(menu, MF_STRING, EXIT_COMMAND, L"\x9000\x51fa")) {
         DestroyMenu(menu);
@@ -337,6 +544,12 @@ static void show_menu(HWND window, POINT position)
                                   position.x, position.y, 0, window, NULL);
     DestroyMenu(menu);
     PostMessageW(window, WM_NULL, 0, 0);
+    if (command)
+        SendMessageW(window, WM_COMMAND, command, 0);
+}
+
+static void execute_command(HWND window, UINT command)
+{
     if (command == EXIT_COMMAND)
         DestroyWindow(window);
     else if (command == HISTORY_COMMAND)
@@ -345,6 +558,18 @@ static void show_menu(HWND window, POINT position)
         BOOL next = !startup_enabled;
         if (set_startup(next) && write_setting(L"Startup", next))
             startup_enabled = next;
+    } else if (command == RANK_COMMAND) {
+        if (set_rank(!rank_enabled))
+            write_setting(L"Rank", rank_enabled);
+    } else if (command == LOG_COMMAND) {
+        if (log_enabled) {
+            log_enabled = FALSE;
+            close_log();
+            write_setting(L"Log", 0);
+        } else if (open_log()) {
+            log_enabled = TRUE;
+            write_setting(L"Log", 1);
+        }
     }
 }
 
@@ -356,6 +581,9 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LP
         return 0;
     }
     switch (message) {
+    case WM_COMMAND:
+        execute_command(window, LOWORD(wparam));
+        return 0;
     case WM_TIMER:
         if (wparam == SAMPLE_TIMER)
             sample_cpu();
@@ -395,6 +623,8 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LP
             Shell_NotifyIconW(NIM_DELETE, &tray);
         if (icon)
             DestroyIcon(icon);
+        close_log();
+        set_rank(FALSE);
         if (history_window)
             DestroyWindow(history_window);
         PostQuitMessage(0);
@@ -435,6 +665,9 @@ static DWORD run(void)
     if (!RegisterClassW(&history_cls))
         goto done;
     load_startup();
+    DWORD setting;
+    set_rank(read_setting(L"Rank", &setting) && setting != 0);
+    log_enabled = read_setting(L"Log", &setting) && setting != 0 && open_log();
     HWND window = CreateWindowExW(WS_EX_TOOLWINDOW, class_name, L"miniTask",
                                   WS_POPUP, 0, 0, 0, 0, NULL, NULL, instance, NULL);
     if (!window)
