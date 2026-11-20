@@ -31,6 +31,7 @@ static const WCHAR class_name[] = L"miniTask.Tray";
 static NOTIFYICONDATAW tray;
 static HICON icon;
 static BOOL tray_added;
+static BOOL shown_high_load;
 static UINT taskbar_created;
 static unsigned shown_level = 11;
 static ULONGLONG previous_total, previous_idle;
@@ -144,7 +145,8 @@ static HICON make_icon(unsigned level)
             if (x >= 1 && x < 15 && y >= 1 && y < 15) {
                 if (x >= 2 && x < 14 && y >= 2 && y < 14) {
                     unsigned height = (level * 12 + 9) / 10;
-                    fill = y >= 14 - height ? 0xff00f060u : 0xff65717au;
+                    DWORD active = cpu_percent > 85 ? 0xffff3030u : 0xff00f060u;
+                    fill = y >= 14 - height ? active : 0xff65717au;
                 } else {
                     fill = 0xff65717au;
                 }
@@ -166,6 +168,7 @@ static HICON make_icon(unsigned level)
 
 static void update_tray(unsigned level)
 {
+    BOOL high_load = cpu_percent > 85;
     WCHAR tip[128];
     if (top_name[0])
         wsprintfW(tip, L"CPU %u%% | %s %u%%", cpu_percent, top_name, top_percent);
@@ -175,7 +178,7 @@ static void update_tray(unsigned level)
     tray.uFlags |= NIF_TIP;
 
     HICON next = icon;
-    if (!icon || level != shown_level) {
+    if (!icon || level != shown_level || high_load != shown_high_load) {
         next = make_icon(level);
         if (!next)
             return;
@@ -199,6 +202,7 @@ static void update_tray(unsigned level)
         DestroyIcon(icon);
     icon = next;
     shown_level = level;
+    shown_high_load = high_load;
 }
 
 static void add_history(unsigned percent, BOOL valid)
