@@ -499,11 +499,11 @@ static void sample_cpu(void)
         lstrcpynW(peak_name, top_name, 64);
     }
     append_log(percent);
+    cpu_percent = percent;
 #ifdef MINITASK_DIAGNOSTICS
     ULONGLONG now = GetTickCount64();
     interval_ms = last_tick ? (DWORD)(now - last_tick) : 0;
     last_tick = now;
-    cpu_percent = percent;
     ++sample_count;
 #endif
     add_history(percent, TRUE);
