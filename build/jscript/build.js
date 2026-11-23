@@ -17,8 +17,9 @@ if (!fso.FolderExists("dist")) {
 }
 
 var output = mode == "release" ? "dist\\miniTask.exe" : "dist\\miniTask-debug.exe";
-var flags = "-m64 -std=c11 -Os -Wall -Wextra -ffunction-sections -fdata-sections" +
+var flags = "-m64 -std=c11 -Os -Wall -Wextra -ffunction-sections" +
     " -fno-stack-protector -nostdlib -mwindows -Wl,--gc-sections,-e,miniTaskStart" +
+    " -Wl,-Map,dist\\miniTask.map" +
     (mode == "release" ? " -s" : " -DMINITASK_DIAGNOSTICS");
 var command = quote(gcc) + " " + flags + " -o " + quote(output) +
     " src\\minitask.c -lkernel32 -luser32 -lshell32 -lgdi32 -ladvapi32";
