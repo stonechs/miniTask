@@ -1,10 +1,9 @@
 # 项目状态
 
-日期：2026-11-23。Windows x64，WinLibs GCC 16.2.0。当前开发版本基于 V0.3。
+日期：2026-11-23。Windows x64，WinLibs GCC 16.2.0、Clang 23.1.5、Crinkler 3.0b、UPX 5.3.0。
 
-构建已取消 `-fdata-sections`，避免 MinGW 将零初始化全局对象逐个放入文件型 `.data` 子节；保留函数分节和链接垃圾回收。map 文件由构建脚本输出到 `dist/miniTask.map`。
+新增统一发布脚本 `build/release-all.ps1`，生成 x86 普通版、x64 普通版、x86 Crinkler 版和 x64 UPX 版。旧的 `build/jscript/build.js` 仍用于单独构建 x64 普通版或调试版。Crinkler x86 版要求 SSE4.2。
 
-验证：正式版 14,336 B，调试版 38,694 B。PE 节表确认 `.data` 原始文件内容 32 B、`.bss` 虚拟空间 4,032 B；历史数组 2,048 B 已进入零初始化区，不再占 EXE 文件原始内容。优化前正式版 18,432 B，当前减少 4,096 B。GCC x64 构建命令见 `build/jscript/build.js`。回归检查通过：正式版、调试版均成功构建，核心采样、托盘更新和窗口过程函数仍在正式 map 中。正式版 map 已在调试构建后重新生成。
+验证：四个产物构建成功，大小依次为 12,800 B、14,336 B、4,426 B、8,192 B。PE 检查确认 x86 两版为 i386，x64 两版为 x86-64；UPX 自检通过。Crinkler x86 和 UPX x64 版本均在本机成功启动，找到托盘窗口并正常退出。未覆盖冷启动、登录启动等长期系统场景。所有版本使用同一源文件，未定义 `MINITASK_DIAGNOSTICS`。
 
-待确认：托盘运行时及负荷开销等系统场景尚未回归。
-
+下一步：发布时运行 `powershell -ExecutionPolicy Bypass -File build/release-all.ps1`。
