@@ -73,7 +73,7 @@ try {
 
     Invoke-Checked $crinkler @(
         "/OUT:$x86Crinkled", '/ENTRY:miniTaskStart', '/SUBSYSTEM:WINDOWS',
-        '/NODEFAULTLIB', '/CRINKLER', '/COMPMODE:FAST', "/LIBPATH:$sdkX86",
+        '/NODEFAULTLIB', '/CRINKLER', '/COMPMODE:FAST', '/HASHSIZE:1', "/LIBPATH:$sdkX86",
         "/LIBPATH:$msvcX86", $x86Object, 'kernel32.lib', 'user32.lib',
         'shell32.lib', 'gdi32.lib', 'advapi32.lib', 'libcmt.lib'
     )
