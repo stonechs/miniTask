@@ -1,14 +1,17 @@
 param(
+    [string]$Version = 'V1.1',
     [string]$GccPath = 'gcc',
     [string]$ClangClPath = 'clang-cl',
-    [string]$CrinklerPath = 'D:\2026work\Crinkler.exe',
+    [string]$CrinklerPath = 'D:\2026work\smolnes_v1X\tools\crinkler\Win32\Crinkler.exe',
     [string]$UpxPath = 'D:\2026work\Compress\tools\upx-5.3.0\upx.exe'
 )
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $dist = Join-Path $root 'dist'
-New-Item -ItemType Directory -Path $dist -Force | Out-Null
+$releaseDir = Join-Path $dist $Version
+$buildSupportDir = Join-Path $releaseDir 'build-support'
+New-Item -ItemType Directory -Path $buildSupportDir -Force | Out-Null
 
 function Resolve-Tool([string]$Path) {
     if (Test-Path -LiteralPath $Path -PathType Leaf) {
@@ -43,12 +46,12 @@ if (-not $msvcToolset) { throw 'MSVC x86 libraries were not found.' }
 $msvcX86 = Join-Path $msvcToolset.FullName 'lib\x86'
 
 $source = Join-Path $root 'src\minitask.c'
-$x64Exe = Join-Path $dist 'miniTask-x64.exe'
-$x64Map = Join-Path $dist 'miniTask-x64.map'
-$x86Exe = Join-Path $dist 'miniTask-x86.exe'
-$x86Object = Join-Path $dist 'miniTask-x86-release.obj'
-$x86Crinkled = Join-Path $dist 'miniTask-x86-crinkler.exe'
-$x64Upx = Join-Path $dist 'miniTask-x64-upx.exe'
+$x64Exe = Join-Path $releaseDir 'miniTask-x64.exe'
+$x64Map = Join-Path $buildSupportDir 'miniTask-x64.map'
+$x86Exe = Join-Path $releaseDir 'miniTask-x86.exe'
+$x86Object = Join-Path $buildSupportDir 'miniTask-x86-release.obj'
+$x86Crinkled = Join-Path $releaseDir 'miniTask-x86-crinkler.exe'
+$x64Upx = Join-Path $releaseDir 'miniTask-x64-upx.exe'
 
 Push-Location $root
 try {

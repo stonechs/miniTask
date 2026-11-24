@@ -10,4 +10,4 @@ V1.0 初始构建：x86 普通版 12,800 B；x64 普通版 14,336 B；x86 Crinkl
 
 V1.1 验证通过：x86 普通版 12,800 B；x64 普通版 14,336 B；x86 Crinkler 版 5,113 B；x64 UPX 版 8,192 B。正式 x86 Crinkler 构建固定传入 `/HASHSIZE:1`（1 MiB），构建输出确认 `Hash size: 1 MB`。PE 架构检查正确，UPX 自检通过；Crinkler x86 后台启动后优先级为 High、工作集约 8.36 MiB，托盘窗口 PID 匹配并正常退出。构建有一条 `DefWindowProcW` forward RVA 警告，Crinkler 自动替换为 `NtdllDefWindowProc_W`，未影响构建和启动。
 
-发布说明：`docs/releases/V1.1.md`。构建命令：`powershell -ExecutionPolicy Bypass -File build/release-all.ps1`。发布资产包含四种架构/压缩组合。
+发布说明：`docs/releases/V1.1.md`。V1.1 快照位于 `dist/V1.1/`，map/obj 位于其中的 `build-support/`；`dist/` 根目录不放构建产物。构建命令：`powershell -ExecutionPolicy Bypass -File build/release-all.ps1`。发布资产包含四种架构/压缩组合。
